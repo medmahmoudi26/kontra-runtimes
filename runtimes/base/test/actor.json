@@ -1,0 +1,6 @@
+{
+  "schemaVersion": "kontra.actor.v1",
+  "name": "runtime-base-fixture",
+  "version": "1.0.0",
+  "runtime": "base:1"
+}

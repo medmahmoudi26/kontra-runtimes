@@ -1,0 +1,14 @@
+# Byte-compiled helpers. CI runs the scripts as scripts; only `tests/` imports them.
+__pycache__/
+*.pyc
+
+# `uv lock` writes uv.lock, which IS committed — it is half of what the buildpack reads. A `uv sync`
+# in a fixture directory would also create .venv, which is not: the venv the actor runs in is built by
+# `heroku/python` inside the image, and a host venv committed here would be a second one that nothing
+# uses and everyone finds.
+.venv/
+
+# pytest, which runs here because scripts/plan.py and scripts/labels.py decide what gets
+# published and signed — their refusals were only ever verified by hand before.
+.pytest_cache/
+__pycache__/

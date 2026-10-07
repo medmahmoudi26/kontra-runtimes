@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "kontra.runtime.v1",
+  "name": "python-browser",
+  "major": 1,
+  "description": "Python run image with Chromium and the fonts headless browsers need.",
+  "builder": "heroku/builder:24",
+  "languages": ["python"],
+  "provides": ["chromium", "playwright-browsers"],
+  "platforms": ["linux/amd64"]
+}

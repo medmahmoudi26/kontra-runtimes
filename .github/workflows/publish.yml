@@ -1,0 +1,306 @@
+name: publish
+
+# WHAT PUBLICATION MEANS HERE. A runtime image is a run image: it is the base of every actor built on
+# it, and once an actor is built the only way off a bad runtime is a rebuild or a rebase. So the gate
+# is not "does the Dockerfile build" — it is "does a real actor, built by the pinned builder, run on
+# it". §3.3 says that in one line; this file is the line.
+#
+# THE MATRIX IS THE DIRECTORY LISTING. §3.3's discovery rule is "adding a runtime means adding a
+# directory and pushing", and a hand-written job list here would be the hardcoded list that rule
+# exists to forbid — one directory ahead of the registry and silently not published.
+#
+# ON A TAG, AND ONLY ON A TAG, anything is pushed. The tag names the runtime and its version:
+#
+#     git tag python-browser/1.0.0 && git push origin python-browser/1.0.0
+#
+# `<name>/<major>.<minor>.<patch>`, so one repository publishes runtimes on independent schedules and
+# the tag is the release record. runtime.json carries `major` (the contract actors reference) and NOT
+# the full version: two spellings of a release is one of them being wrong.
+
+on:
+  push:
+    branches: [dev, main]
+    tags: ['*/[0-9]+.[0-9]+.[0-9]+']
+  pull_request:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ═════════════════════════════════════════════════════════════════════════════════════════════════
+  # PLAN — what is being built, and is the tree internally consistent
+  # ═════════════════════════════════════════════════════════════════════════════════════════════════
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      publish: ${{ steps.matrix.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # BEFORE ANY BUILD, because every failure this catches is a failure the build would reach four
+      # minutes later with a worse message: a `.python-version` the Heroku Python CNB refuses without,
+      # a base digest that drifted in one Dockerfile, a `playwright==` pin that agrees with nothing.
+      - name: check
+        run: python3 scripts/check.py
+
+      # THE SCRIPTS THAT DECIDE WHAT IS BUILT AND WHAT IT IS LABELLED ARE THEMSELVES TESTED. A wrong
+      # answer from either is invisible at build time and fatal afterwards: §3.3's discovery reads
+      # nothing but the `dev.kontra.runtime.*` labels, so an unlabelled runtime pushes and signs green
+      # and is then missing from the console and unresolvable by `kontra deploy`. stdlib `unittest`,
+      # so this needs nothing installed.
+      - name: test the scripts
+        run: python3 -m unittest discover -s tests
+
+      - name: matrix
+        id: matrix
+        run: python3 scripts/plan.py "$GITHUB_REF" >> "$GITHUB_OUTPUT"
+
+  # ═════════════════════════════════════════════════════════════════════════════════════════════════
+  # RUNTIME — build it, build a real actor on it, run that actor, and only then push and sign
+  # ═════════════════════════════════════════════════════════════════════════════════════════════════
+  runtime:
+    needs: plan
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    permissions:
+      contents: read
+      packages: write
+      # KEYLESS SIGSTORE, AND THIS LINE IS THE WHOLE OF THE CREDENTIAL. `id-token: write` lets the job
+      # ask GitHub for a short-lived OIDC token; Fulcio exchanges it for a certificate naming this
+      # workflow. There is no key to leak because there is no key.
+      id-token: write
+    env:
+      # §3.3's `<registry>/kontra-runtimes/<name>`. `github.repository` is `<owner>/kontra-runtimes`,
+      # so the prefix is derived rather than typed and a fork publishes to its own namespace with no
+      # edit. Spelled once, here: a job-level `env:` cannot read the `env` context, so a workflow-level
+      # `REGISTRY_PREFIX` could not be referenced from this line and would be decoration.
+      IMAGE: ghcr.io/${{ github.repository }}/${{ matrix.name }}
+      DIR: runtimes/${{ matrix.name }}
+      # OFF A TAG THIS IS `<major>.0.0` AND NOTHING IS PUSHED — see scripts/plan.py. It is per runtime
+      # because labels.py refuses a version whose major disagrees with that runtime's runtime.json.
+      VERSION: ${{ matrix.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # NO QEMU, AND `scripts/check.py` KEEPS THAT HONEST. Every runtime that declares a second
+      # architecture has no `RUN` instruction, so buildx assembles it from manifests it never
+      # executes. check.py refuses the combination that would need emulation, so this absence is an
+      # asserted property rather than an assumption.
+
+      # PINNED BY SHA, NOT BY TAG. `pack` is the thing that decides what every actor image contains;
+      # a floating download is an unreviewed change to every build on the install. The digest is
+      # builder.json's, so there is one place to bump it.
+      - name: install pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          url=$(python3 -c 'import json;print(json.load(open("builder.json"))["pack"]["url"])')
+          want=$(python3 -c 'import json;print(json.load(open("builder.json"))["pack"]["sha256"]["tarball"])')
+          curl -sSfL -o /tmp/pack.tgz "$url"
+          echo "$want  /tmp/pack.tgz" | sha256sum -c -
+          sudo tar -xzf /tmp/pack.tgz -C /usr/local/bin pack
+          pack --version
+
+      - name: builder, pinned by digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          image=$(python3 -c 'import json;d=json.load(open("builder.json"))["builder"];print(d["image"])')
+          digest=$(python3 -c 'import json;d=json.load(open("builder.json"))["builder"];print(d["digest"])')
+          repo=${image%:*}
+          docker pull "$repo@$digest"
+          # THE TAG IS RE-POINTED AT THE PINNED DIGEST so `pack build --builder heroku/builder:24`
+          # resolves to the reviewed bytes. Passing the digest to `--builder` instead would work, and
+          # would also stop matching the `builder` field every runtime.json declares — which is the
+          # string §3.4's compatibility check compares.
+          docker tag "$repo@$digest" "$image"
+
+      # ── THE RUNTIME, BUILT ONCE FOR THE LOCAL ARCHITECTURE SO THE GATE CAN RUN ON IT ────────────
+      #
+      # THE LABEL ARGUMENTS ARE ASSIGNED, NEVER SUBSTITUTED INTO THE COMMAND. errexit does not fire
+      # inside an argument list, so `build … "$(labels.py …)"` builds an unlabelled image and reports
+      # success; an assignment is where it fires. `mapfile` expands one argument per line, so no `eval`
+      # runs runtime.json's `description` through a shell. Same two lines in every build step below.
+      - name: build ${{ matrix.name }} (amd64, local)
+        shell: bash
+        run: |
+          set -euo pipefail
+          labels=$(python3 scripts/labels.py "$DIR" "$VERSION" --args)
+          mapfile -t label_args <<<"$labels"
+          docker buildx build --load \
+            --platform linux/amd64 \
+            -t "$IMAGE:gate" \
+            "${label_args[@]}" \
+            -f "$DIR/Dockerfile" "$DIR"
+          docker image inspect "$IMAGE:gate" \
+            --format 'user={{.Config.User}} layers={{len .RootFS.Layers}}'
+
+      # THE SEVEN LABELS ARE THE PUBLISHED INTERFACE, SO THE BUILT IMAGE IS READ BACK. §3.3's discovery
+      # lists repositories under `kontra-runtimes/` and reads each image's labels and nothing else, so a
+      # runtime missing one is a runtime the console cannot show and `kontra deploy` cannot resolve.
+      # Deriving the labels and APPLYING them are two claims; this is the second one.
+      - name: the built image carries every dev.kontra.runtime label
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker image inspect "$IMAGE:gate" --format '{{json .Config.Labels}}' \
+            | python3 scripts/labels.py "$DIR" "$VERSION" --verify
+
+      # A RUN IMAGE THAT ENDS ON root EXPORTS ACTOR IMAGES THAT RUN AS root, silently. check.py reads
+      # the Dockerfile; this reads the image, which is the thing that gets published.
+      - name: the published image runs as uid 1000
+        shell: bash
+        run: |
+          set -euo pipefail
+          user=$(docker image inspect "$IMAGE:gate" --format '{{.Config.User}}')
+          [ "$user" = "heroku" ] || { echo "::error::$IMAGE:gate User is '$user', want 'heroku'"; exit 1; }
+          id=$(docker run --rm --entrypoint id "$IMAGE:gate" -u)
+          [ "$id" = "1000" ] || { echo "::error::$IMAGE:gate runs as uid $id, want 1000"; exit 1; }
+
+      # ── THE GATE: A REAL ACTOR, BUILT BY THE PINNED BUILDER, RUN ────────────────────────────────
+      #
+      # `--trust-builder=false` here too, and not only in `kontra deploy`. Untrusted mode runs the
+      # lifecycle phases in separate containers, which is a different code path from the trusted one;
+      # a gate that built trusted would be proving a build nobody performs.
+      - name: pack build the fixture actor
+        shell: bash
+        run: |
+          set -euo pipefail
+          pack build "fixture/${{ matrix.name }}:gate" \
+            --builder "$(python3 -c 'import json;print(json.load(open("builder.json"))["builder"]["image"])')" \
+            --run-image "$IMAGE:gate" \
+            --path "$DIR/test" \
+            --trust-builder=false \
+            --pull-policy if-not-present
+
+      # `--entrypoint worker`, NOT a trailing `worker` argument: the CNB launcher execs a trailing
+      # argument as a command, so `docker run <image> worker` fails with `worker: command not found`
+      # and reads as a broken fixture. The process type is selected by the entrypoint.
+      - name: run the fixture's worker process
+        run: docker run --rm --entrypoint worker "fixture/${{ matrix.name }}:gate"
+
+      # SPEC §7 IS A PROPERTY OF THE RUNTIME, SO IT IS GATED HERE AND NOT ONLY IN kontra. A runtime
+      # whose patch release cannot carry its actors forward is a runtime whose only remedy is
+      # rebuilding every actor on it — and that is discovered on the day of a CVE, under time
+      # pressure, or not at all.
+      #
+      # THE PATCH IS SIMULATED BY MOVING THE TAG, which is exactly how a real one arrives: the runtime
+      # is rebuilt with one extra label so its config digest changes while every layer is a cache hit,
+      # and `$IMAGE:gate` is re-pointed at it. MEASURED, and the reason the rebase names a TAG and not
+      # a digest: rebasing onto a reference whose NAME differs from the one recorded at build time is
+      # refused ("new base image not found in existing run image metadata … please provide -force"),
+      # while rebasing onto the recorded name after it has moved succeeds.
+      #
+      # WHAT IT ASSERTS is acceptance test 4's shape: a new actor digest, the app and dependency layer
+      # digests unchanged, and the actor still runs.
+      - name: a moved :major tag rebases the fixture with no rebuild
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture="fixture/${{ matrix.name }}:gate"
+          before_app=$(docker inspect "$fixture" --format '{{index .Config.Labels "io.buildpacks.lifecycle.metadata"}}' \
+            | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["app"][0]["sha"], *(l["sha"] for b in d.get("buildpacks",[]) for l in b.get("layers",{}).values()))')
+          before_id=$(docker image inspect "$fixture" --format '{{.Id}}')
+
+          labels=$(python3 scripts/labels.py "$DIR" "$VERSION" --args)
+          mapfile -t label_args <<<"$labels"
+          docker buildx build --load \
+            --platform linux/amd64 \
+            -t "$IMAGE:gate" \
+            --label "dev.kontra.ci.rebase-probe=${GITHUB_RUN_ID}" \
+            "${label_args[@]}" \
+            -f "$DIR/Dockerfile" "$DIR"
+
+          pack rebase "$fixture" --run-image "$IMAGE:gate" --pull-policy if-not-present
+
+          after_app=$(docker inspect "$fixture" --format '{{index .Config.Labels "io.buildpacks.lifecycle.metadata"}}' \
+            | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["app"][0]["sha"], *(l["sha"] for b in d.get("buildpacks",[]) for l in b.get("layers",{}).values()))')
+          after_id=$(docker image inspect "$fixture" --format '{{.Id}}')
+
+          [ "$before_app" = "$after_app" ] || {
+            echo "::error::rebase changed the app/dependency layers: $before_app -> $after_app"; exit 1; }
+          [ "$before_id" != "$after_id" ] || {
+            echo "::error::rebase produced the same image id $after_id, so nothing moved"; exit 1; }
+          docker run --rm --entrypoint worker "$fixture"
+
+      # ── PUBLICATION ─────────────────────────────────────────────────────────────────────────────
+      - uses: docker/login-action@v3
+        if: needs.plan.outputs.publish == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # REBUILT FOR EVERY DECLARED PLATFORM, FROM THE SAME CACHE. The amd64 half is a cache hit, so
+      # this is not a second build of the thing the gate just passed — it is the same layers plus the
+      # other architectures' manifests.
+      #
+      # TWO TAGS, AS §3.3 REQUIRES: `:<major>` moves and is what an actor.json references; `:<version>`
+      # is immutable and is what a rebase moves away from. The digest is read back from buildx's
+      # metadata rather than guessed, because the digest is the identity (ADR 0032).
+      - name: push ${{ matrix.name }}:${{ matrix.major }} and :${{ matrix.version }}
+        if: needs.plan.outputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          labels=$(python3 scripts/labels.py "$DIR" "$VERSION" --args)
+          mapfile -t label_args <<<"$labels"
+          docker buildx build --push \
+            --platform "${{ matrix.platforms }}" \
+            --metadata-file /tmp/meta.json \
+            -t "$IMAGE:${{ matrix.major }}" \
+            -t "$IMAGE:$VERSION" \
+            "${label_args[@]}" \
+            -f "$DIR/Dockerfile" "$DIR"
+          digest=$(python3 -c 'import json;print(json.load(open("/tmp/meta.json"))["containerimage.digest"])')
+          echo "DIGEST=$digest" >> "$GITHUB_ENV"
+          echo "pushed $IMAGE:$VERSION@$digest"
+
+      - uses: sigstore/cosign-installer@v3
+        if: needs.plan.outputs.publish == 'true'
+
+      # SIGNED, AND NOTHING VERIFIES IT AT PULL YET — see the README's "Signed, and not yet checked".
+      # BLOCKER #45: kontra signs its own control-plane images in CI and signs no actor or runtime
+      # image anywhere, and the Warden's trust policy ships with `KONTRA_TRUST_UNSIGNED` equal to
+      # `KONTRA_TRUST_REGISTRIES` in all four shipped configurations, so `Verify` is never called.
+      # The signature is produced here anyway, because a store with signatures and a consumer that
+      # starts checking is a switch to flip; a store without them is a republication of everything.
+      #
+      # BY DIGEST, NEVER BY TAG. `cosign sign $IMAGE:$VERSION` resolves the tag again, so a tag that
+      # moved between the push and this step signs something else entirely.
+      - name: sign, and verify in this run
+        if: needs.plan.outputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          identity="https://github.com/${GITHUB_WORKFLOW_REF}"
+          issuer="https://token.actions.githubusercontent.com"
+          cosign sign --yes "$IMAGE@$DIGEST"
+          # A SIGNATURE NOBODY HAS VERIFIED IS A FILE. Verifying here, in the run that made it, is
+          # what makes the keyless path proven rather than configured.
+          cosign verify \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer "$issuer" \
+            "$IMAGE@$DIGEST" > /dev/null
+          {
+            echo "### ${{ matrix.name }}:$VERSION"
+            echo
+            echo '```'
+            echo "$IMAGE:${{ matrix.major }}"
+            echo "$IMAGE:$VERSION"
+            echo "$IMAGE@$DIGEST"
+            echo '```'
+            echo
+            echo "Mirror it into an install's zot by digest:"
+            echo
+            echo '```sh'
+            echo "kontra runtime import --from $IMAGE@$DIGEST"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

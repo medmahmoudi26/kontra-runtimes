@@ -1,0 +1,8 @@
+# `worker` is what §4.2 and §4.3 name, and the CI gate runs exactly this process. §4.3 calls the
+# Procfile optional for a Go actor because the built binary is the default process; it is declared
+# here anyway so one gate command (`docker run --entrypoint worker <image>`) covers every fixture in
+# this repository.
+#
+# `base` is the binary name `heroku/go` derives from the last path element of this module — MEASURED:
+# the built binary lands at /layers/heroku_go/go_target/bin/base, which is on the launch PATH.
+worker: base

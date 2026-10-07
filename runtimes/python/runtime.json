@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "kontra.runtime.v1",
+  "name": "python",
+  "major": 1,
+  "description": "Python actors with no system dependency beyond the stock run image. The default for Python.",
+  "builder": "heroku/builder:24",
+  "languages": ["python"],
+  "provides": [],
+  "platforms": ["linux/amd64", "linux/arm64"]
+}

@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "kontra.builder.v1",
+  "builder": {
+    "image": "heroku/builder:24",
+    "digest": "sha256:97aa835c2e0528c623bd500a9e16030dacc08be1cddd34ce78918974de4098c1"
+  },
+  "runImage": {
+    "image": "index.docker.io/heroku/heroku:24",
+    "from": "heroku/heroku@sha256:a2a63bd1b4e9f22ffcc60e4f5baf496b057c95517d063045dd9b0ffcf850890b",
+    "digest": "sha256:a2a63bd1b4e9f22ffcc60e4f5baf496b057c95517d063045dd9b0ffcf850890b",
+    "stackId": "heroku-24",
+    "distro": { "name": "ubuntu", "version": "24.04" },
+    "user": "heroku",
+    "uid": 1000,
+    "gid": 1000
+  },
+  "lifecycle": {
+    "version": "0.21.22",
+    "platformApi": { "default": "0.7", "max": "0.15" },
+    "buildpackApi": { "default": "0.7", "max": "0.12" }
+  },
+  "pack": {
+    "version": "v0.40.9",
+    "url": "https://github.com/buildpacks/pack/releases/download/v0.40.9/pack-v0.40.9-linux.tgz",
+    "sha256": {
+      "tarball": "dc0ee1e931cf8a106d7555a01a214864f9acb60b77adf15d69b74df4404758e9",
+      "binary": "2f85c3ec624f73f2d3c4a680a2c48fe6755197844730cc4ea5ed05f950fe05a3"
+    }
+  },
+  "buildpacks": {
+    "heroku/python": "6.7.0",
+    "heroku/go": "4.1.1",
+    "heroku/procfile": "4.2.4",
+    "heroku/deb-packages": "1.0.2"
+  }
+}

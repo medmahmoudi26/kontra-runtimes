@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "kontra.runtime.v1",
+  "name": "base",
+  "major": 1,
+  "description": "The builder's own run image, unmodified. Go actors and any self-contained binary.",
+  "builder": "heroku/builder:24",
+  "languages": ["go"],
+  "provides": [],
+  "platforms": ["linux/amd64", "linux/arm64"]
+}

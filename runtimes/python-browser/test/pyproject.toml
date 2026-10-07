@@ -1,0 +1,14 @@
+# ONE DEPENDENCY, AND ITS VERSION IS THE RUNTIME'S. `playwright` is the client; the browser it drives
+# lives in the run image at /opt/ms-playwright. Playwright refuses a bundle it was not shipped
+# against, so this pin and `../Dockerfile`'s `ARG PLAYWRIGHT_VERSION` are one fact in two files —
+# `scripts/check.py` asserts they agree.
+[project]
+name = "runtime-python-browser-fixture"
+version = "1.0.0"
+description = "Fixture actor for the python-browser:1 runtime."
+# `>=3.12,<3.13`, not `~=3.12`: uv warns that a tilde without a patch version means `>=3.12,<4`,
+# which would let the resolver pick wheels for an interpreter `.python-version` will never install.
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "playwright==1.58.0",
+]

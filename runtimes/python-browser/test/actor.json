@@ -1,0 +1,6 @@
+{
+  "schemaVersion": "kontra.actor.v1",
+  "name": "runtime-python-browser-fixture",
+  "version": "1.0.0",
+  "runtime": "python-browser:1"
+}

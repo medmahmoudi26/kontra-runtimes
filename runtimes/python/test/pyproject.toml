@@ -1,0 +1,17 @@
+# The fixture's dependencies, declared the way §4.2 requires: pyproject.toml + uv.lock, resolved by
+# `heroku/python` 6.7.0 through uv. No `kontra-sdk` — see actor.py for why it cannot be here.
+#
+# Two dependencies, each buying one check actor.py makes: `httpx` is a pure-python wheel (the venv
+# layer exists and is importable at run time) and `orjson` is a C extension (the manylinux wheel's
+# glibc floor is met by this run image).
+[project]
+name = "runtime-python-fixture"
+version = "1.0.0"
+description = "Fixture actor for the python:1 runtime."
+# `>=3.12,<3.13`, not `~=3.12`: uv warns that a tilde without a patch version means `>=3.12,<4`,
+# which would let the resolver pick wheels for an interpreter `.python-version` will never install.
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "httpx==0.27.2",
+    "orjson==3.10.7",
+]

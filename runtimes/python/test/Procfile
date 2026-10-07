@@ -1,0 +1,8 @@
+# `worker` is what §4.2 names, and the CI gate runs exactly this process: `docker run --entrypoint
+# worker <image>`. NOT `docker run <image> worker` — the CNB launcher treats a trailing argument as a
+# command to exec, so that spelling fails with `worker: command not found` and looks like a broken
+# fixture. The process type is selected by the ENTRYPOINT.
+#
+# It exits 0 rather than serving, because a real `worker` is `actor.serve()` waiting on a Temporal
+# task queue, which is a control plane this repository does not have.
+worker: python actor.py
